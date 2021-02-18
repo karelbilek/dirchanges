@@ -1,13 +1,11 @@
-package watcher
+package dirchanges
 
 import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"testing"
-	"time"
 )
 
 // setup creates all required files and folders for
@@ -90,53 +88,6 @@ func TestEventString(t *testing.T) {
 	}
 }
 
-func TestFileInfo(t *testing.T) {
-	modTime := time.Now()
-
-	fInfo := &fileInfo{
-		name:    "finfo",
-		size:    1,
-		mode:    os.ModeDir,
-		modTime: modTime,
-		sys:     nil,
-		dir:     true,
-	}
-
-	// Test file info methods.
-	if fInfo.Name() != "finfo" {
-		t.Fatalf("expected fInfo.Name() to be 'finfo', got %s", fInfo.Name())
-	}
-	if fInfo.IsDir() != true {
-		t.Fatalf("expected fInfo.IsDir() to be true, got %t", fInfo.IsDir())
-	}
-	if fInfo.Size() != 1 {
-		t.Fatalf("expected fInfo.Size() to be 1, got %d", fInfo.Size())
-	}
-	if fInfo.Sys() != nil {
-		t.Fatalf("expected fInfo.Sys() to be nil, got %v", fInfo.Sys())
-	}
-	if fInfo.ModTime() != modTime {
-		t.Fatalf("expected fInfo.ModTime() to be %v, got %v", modTime, fInfo.ModTime())
-	}
-	if fInfo.Mode() != os.ModeDir {
-		t.Fatalf("expected fInfo.Mode() to be os.ModeDir, got %#v", fInfo.Mode())
-	}
-
-	w := New()
-
-	w.wg.Done() // Set the waitgroup to done.
-
-	go func() {
-		// Trigger an event with the file info.
-		w.TriggerEvent(Create, fInfo)
-	}()
-
-	e := <-w.Event
-
-	if e.FileInfo != fInfo {
-		t.Fatal("expected e.FileInfo to be equal to fInfo")
-	}
-}
 
 func TestWatcherAdd(t *testing.T) {
 	testDir, teardown := setup(t)
@@ -485,7 +436,10 @@ func TestListFiles(t *testing.T) {
 	w := New()
 	w.AddRecursive(testDir)
 
-	fileList := w.retrieveFileList()
+	fileList, err := w.retrieveFileList()
+	if err != nil {
+		t.Errorf("unexpected error: %+v", err)
+	}
 	if fileList == nil {
 		t.Error("expected file list to not be empty")
 	}
@@ -498,45 +452,13 @@ func TestListFiles(t *testing.T) {
 	}
 
 	// Try to call list on a file that's not a directory.
-	fileList, err := w.list(fname)
+	fileList, err = w.list(fname)
 	if err != nil {
 		t.Error("expected err to be nil")
 	}
 	if len(fileList) != 1 {
 		t.Errorf("expected len of file list to be 1, got %d", len(fileList))
 	}
-}
-
-func TestTriggerEvent(t *testing.T) {
-	w := New()
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
-		select {
-		case event := <-w.Event:
-			if event.Name() != "triggered event" {
-				t.Errorf("expected event file name to be triggered event, got %s",
-					event.Name())
-			}
-		case <-time.After(time.Millisecond * 250):
-			t.Fatal("received no event from Event channel")
-		}
-	}()
-
-	go func() {
-		// Start the watching process.
-		if err := w.Start(time.Millisecond * 100); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	w.TriggerEvent(Create, nil)
-
-	wg.Wait()
 }
 
 func TestEventAddFile(t *testing.T) {
@@ -564,449 +486,27 @@ func TestEventAddFile(t *testing.T) {
 		}
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
-		events := 0
-		for {
-			select {
-			case event := <-w.Event:
-				if event.Op != Create {
-					t.Errorf("expected event to be Create, got %s", event.Op)
-				}
-
-				files[event.Name()] = true
-				events++
-
-				// Check Path and OldPath content
-				newFile := filepath.Join(testDir, event.Name())
-				if event.Path != newFile {
-					t.Errorf("Event.Path should be %s but got %s", newFile, event.Path)
-				}
-				if event.OldPath != "" {
-					t.Errorf("Event.OldPath should be empty on create, but got %s", event.OldPath)
-				}
-
-				if events == len(files) {
-					return
-				}
-			case <-time.After(time.Millisecond * 250):
-				for f, e := range files {
-					if !e {
-						t.Errorf("received no event for file %s", f)
-					}
-				}
-				return
-			}
-		}
-	}()
-
-	go func() {
-		// Start the watching process.
-		if err := w.Start(time.Millisecond * 100); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	wg.Wait()
-}
-
-// TODO: TestIgnoreFiles
-func TestIgnoreFiles(t *testing.T) {}
-
-func TestEventDeleteFile(t *testing.T) {
-	testDir, teardown := setup(t)
-	defer teardown()
-
-	w := New()
-	w.FilterOps(Remove)
-
-	// Add the testDir to the watchlist.
-	if err := w.AddRecursive(testDir); err != nil {
-		t.Fatal(err)
+	diff, err := w.Diff()
+	if err!=nil {
+		t.Errorf("unexpected error: %+v", err)
 	}
-
-	files := map[string]bool{
-		"file_1.txt": false,
-		"file_2.txt": false,
-		"file_3.txt": false,
-	}
-
-	for f := range files {
-		filePath := filepath.Join(testDir, f)
-		if err := os.Remove(filePath); err != nil {
-			t.Error(err)
-		}
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
-		events := 0
-		for {
-			select {
-			case event := <-w.Event:
-				if event.Op != Remove {
-					t.Errorf("expected event to be Remove, got %s", event.Op)
-				}
-
-				files[event.Name()] = true
-				events++
-
-				if events == len(files) {
-					return
-				}
-			case <-time.After(time.Millisecond * 250):
-				for f, e := range files {
-					if !e {
-						t.Errorf("received no event for file %s", f)
-					}
-				}
-				return
-			}
-		}
-	}()
-
-	go func() {
-		// Start the watching process.
-		if err := w.Start(time.Millisecond * 100); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	wg.Wait()
-}
-
-func TestEventRenameFile(t *testing.T) {
-	testDir, teardown := setup(t)
-	defer teardown()
-
-	srcFilename := "file.txt"
-	dstFilename := "file1.txt"
-
-	w := New()
-	w.FilterOps(Rename)
-
-	// Add the testDir to the watchlist.
-	if err := w.AddRecursive(testDir); err != nil {
-		t.Fatal(err)
-	}
-
-	// Rename a file.
-	if err := os.Rename(
-		filepath.Join(testDir, srcFilename),
-		filepath.Join(testDir, dstFilename),
-	); err != nil {
-		t.Error(err)
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
-		select {
-		case event := <-w.Event:
-			if event.Op != Rename {
-				t.Errorf("expected event to be Rename, got %s", event.Op)
-			}
-
-			// Check Path and OldPath content
-			oldFile := filepath.Join(testDir, srcFilename)
-			newFile := filepath.Join(testDir, dstFilename)
-			if event.Path != newFile {
-				t.Errorf("Event.Path should be %s but got %s", newFile, event.Path)
-			}
-			if event.OldPath != oldFile {
-				t.Errorf("Event.OldPath should %s but got %s", oldFile, event.OldPath)
-			}
-
-		case <-time.After(time.Millisecond * 250):
-			t.Fatal("received no rename event")
-		}
-	}()
-
-	go func() {
-		// Start the watching process.
-		if err := w.Start(time.Millisecond * 100); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	wg.Wait()
-}
-
-func TestEventChmodFile(t *testing.T) {
-	// Chmod is not supported under windows.
-	if runtime.GOOS == "windows" {
-		return
-	}
-
-	testDir, teardown := setup(t)
-	defer teardown()
-
-	w := New()
-	w.FilterOps(Chmod)
-
-	// Add the testDir to the watchlist.
-	if err := w.Add(testDir); err != nil {
-		t.Fatal(err)
-	}
-
-	files := map[string]bool{
-		"file_1.txt": false,
-		"file_2.txt": false,
-		"file_3.txt": false,
-	}
-
-	for f := range files {
-		filePath := filepath.Join(testDir, f)
-		if err := os.Chmod(filePath, os.ModePerm); err != nil {
-			t.Error(err)
-		}
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
-		events := 0
-		for {
-			select {
-			case event := <-w.Event:
-				if event.Op != Chmod {
-					t.Errorf("expected event to be Remove, got %s", event.Op)
-				}
-
-				files[event.Name()] = true
-				events++
-
-				if events == len(files) {
-					return
-				}
-			case <-time.After(time.Millisecond * 250):
-				for f, e := range files {
-					if !e {
-						t.Errorf("received no event for file %s", f)
-					}
-				}
-				return
-			}
-		}
-	}()
-
-	go func() {
-		// Start the watching process.
-		if err := w.Start(time.Millisecond * 100); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	wg.Wait()
-}
-
-func TestWatcherStartWithInvalidDuration(t *testing.T) {
-	w := New()
-
-	err := w.Start(0)
-	if err != ErrDurationTooShort {
-		t.Fatalf("expected ErrDurationTooShort error, got %s", err.Error())
-	}
-}
-
-func TestWatcherStartWhenAlreadyRunning(t *testing.T) {
-	w := New()
-
-	go func() {
-		err := w.Start(time.Millisecond * 100)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}()
-	w.Wait()
-
-	err := w.Start(time.Millisecond * 100)
-	if err != ErrWatcherRunning {
-		t.Fatalf("expected ErrWatcherRunning error, got %s", err.Error())
-	}
-}
-
-func BenchmarkEventRenameFile(b *testing.B) {
-	testDir, teardown := setup(b)
-	defer teardown()
-
-	w := New()
-	w.FilterOps(Rename)
-
-	// Add the testDir to the watchlist.
-	if err := w.AddRecursive(testDir); err != nil {
-		b.Fatal(err)
-	}
-
-	go func() {
-		// Start the watching process.
-		if err := w.Start(time.Millisecond); err != nil {
-			b.Fatal(err)
-		}
-	}()
-
-	var filenameFrom = filepath.Join(testDir, "file.txt")
-	var filenameTo = filepath.Join(testDir, "file1.txt")
-
-	for i := 0; i < b.N; i++ {
-		// Rename a file.
-		if err := os.Rename(
-			filenameFrom,
-			filenameTo,
-		); err != nil {
-			b.Error(err)
+	for _, event := range diff {
+		if event.Op != Create {
+			t.Errorf("expected event to be Create, got %s", event.Op)
 		}
 
-		select {
-		case event := <-w.Event:
-			if event.Op != Rename {
-				b.Errorf("expected event to be Rename, got %s", event.Op)
-			}
-		case <-time.After(time.Millisecond * 250):
-			b.Fatal("received no rename event")
+		files[event.Name()] = true
+
+		// Check Path and OldPath content
+		newFile := filepath.Join(testDir, event.Name())
+		if event.Path != newFile {
+			t.Errorf("Event.Path should be %s but got %s", newFile, event.Path)
 		}
-
-		filenameFrom, filenameTo = filenameTo, filenameFrom
-	}
-}
-
-func BenchmarkListFiles(b *testing.B) {
-	testDir, teardown := setup(b)
-	defer teardown()
-
-	w := New()
-	err := w.AddRecursive(testDir)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	for i := 0; i < b.N; i++ {
-		fileList := w.retrieveFileList()
-		if fileList == nil {
-			b.Fatal("expected file list to not be empty")
+		if event.OldPath != "" {
+			t.Errorf("Event.OldPath should be empty on create, but got %s", event.OldPath)
 		}
 	}
-}
-
-func TestClose(t *testing.T) {
-	testDir, teardown := setup(t)
-	defer teardown()
-
-	w := New()
-
-	err := w.Add(testDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	wf := w.WatchedFiles()
-	fileList := w.retrieveFileList()
-
-	if len(wf) != len(fileList) {
-		t.Fatalf("expected len of wf to be %d, got %d", len(fileList), len(wf))
-	}
-
-	// Call close on the watcher even though it's not running.
-	w.Close()
-
-	wf = w.WatchedFiles()
-	fileList = w.retrieveFileList()
-
-	// Close will be a no-op so there will still be len(fileList) files.
-	if len(wf) != len(fileList) {
-		t.Fatalf("expected len of wf to be %d, got %d", len(fileList), len(wf))
-	}
-
-	// Set running to true.
-	w.running = true
-
-	// Now close the watcher.
-	go func() {
-		// Receive from the w.close channel to avoid a deadlock.
-		<-w.close
-	}()
-
-	w.Close()
-
-	wf = w.WatchedFiles()
-
-	// Close will be a no-op so there will still be len(fileList) files.
-	if len(wf) != 0 {
-		t.Fatalf("expected len of wf to be 0, got %d", len(wf))
-	}
-
-}
-
-func TestWatchedFiles(t *testing.T) {
-	testDir, teardown := setup(t)
-	defer teardown()
-
-	w := New()
-
-	err := w.Add(testDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	wf := w.WatchedFiles()
-	fileList := w.retrieveFileList()
-
-	if len(wf) != len(fileList) {
-		t.Fatalf("expected len of wf to be %d, got %d", len(fileList), len(wf))
-	}
-
-	for path := range fileList {
-		if _, found := wf[path]; !found {
-			t.Fatalf("%s not found in watched file's list", path)
-		}
-	}
-}
-
-func TestSetMaxEvents(t *testing.T) {
-	w := New()
-
-	if w.maxEvents != 0 {
-		t.Fatalf("expected max events to be 0, got %d", w.maxEvents)
-	}
-
-	w.SetMaxEvents(3)
-
-	if w.maxEvents != 3 {
-		t.Fatalf("expected max events to be 3, got %d", w.maxEvents)
-	}
-}
-
-func TestOpsString(t *testing.T) {
-	testCases := []struct {
-		want     Op
-		expected string
-	}{
-		{Create, "CREATE"},
-		{Write, "WRITE"},
-		{Remove, "REMOVE"},
-		{Rename, "RENAME"},
-		{Chmod, "CHMOD"},
-		{Move, "MOVE"},
-		{Op(10), "???"},
-	}
-
-	for _, tc := range testCases {
-		if tc.want.String() != tc.expected {
-			t.Errorf("expected %s, got %s", tc.expected, tc.want.String())
-		}
+	if len(diff) != len(files) {
+		t.Errorf("received wrong numbers of events")
 	}
 }

@@ -1,6 +1,6 @@
 // +build windows
 
-package watcher
+package dirchanges
 
 import (
 	"syscall"
